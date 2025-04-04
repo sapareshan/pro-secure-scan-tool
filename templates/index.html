@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Domain Scanner</title>
+</head>
+<body>
+    <h2>Enter Domain to Scan</h2>
+    <input type="text" id="domain" placeholder="Enter domain (e.g., example.com)">
+    <button onclick="scanDomain()">Scan</button>  <!-- No more ReferenceError -->
+
+    <h3>Scan Results:</h3>
+    <pre id="results"></pre>  <!-- Fixed ID to match JS -->
+
+    <script>
+        function scanDomain() {  //  Define scanDomain function
+            let domain = document.getElementById("domain").value;
+            
+            fetch("http://127.0.0.1:5000/scan", {  //  Corrected API URL
+                method: "POST",
+                headers: { "Content-Type": "application/json" },  //  Set correct Content-Type
+                body: JSON.stringify({ domain: domain })  //  Send domain as JSON
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById("results").innerHTML = 
+                    "<h3>Scan Result:</h3><pre>" + JSON.stringify(data, null, 2) + "</pre>";  // Display response
+            })
+            .catch(error => console.error("Error:", error));
+        }
+    </script>
+    
+</body>
+</html>
