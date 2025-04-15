@@ -61,7 +61,7 @@ class Vulnerabilities(Base):
 '''
 
   
-engine = create_engine('mysql+pymysql://root:Dm!12345@localhost/pro_secure');
+engine = create_engine('mysql+pymysql://root:kali@localhost/pro_secure_labs');
 
 # Session factory, bound to the engine
 Session = sessionmaker(bind=engine)
@@ -72,7 +72,7 @@ Session = sessionmaker(bind=engine)
 
 
 def get_db_session():
-    engine = create_engine('mysql+pymysql://root:Dm!12345@localhost/pro_secure', pool_pre_ping=True)
+    engine = create_engine('mysql+pymysql://root:kali@localhost/pro_secure_labs', pool_pre_ping=True)
     Session = sessionmaker(bind=engine)
     return Session()
 
@@ -109,7 +109,7 @@ def some_function():
 
 # ✅ Function to initialize database
 
-engine = create_engine('mysql+pymysql://root:Dm!12345@localhost/pro_secure', pool_pre_ping=True)
+engine = create_engine('mysql+pymysql://root:kali@localhost/pro_secure_labs', pool_pre_ping=True)
 def init_db():
     Base.metadata.create_all(engine)
     print("Database tables created successfully!")  # ✅  Added a success message

@@ -18,82 +18,15 @@ import socket
 import requests
 import random
 from email_base import sendOtp
-
-
-'''
-from sqlalchemy import create_engine;
-from typing import List
-from typing import Optional
-# from sqlalchemy import ForeignKey
-# from sqlalchemy import String
-# from sqlalchemy.orm import DeclarativeBase
-# from sqlalchemy.orm import Mapped
-# from sqlalchemy.orm import mapped_column
-# from sqlalchemy.orm import relationship
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm import relationship
-from sqlalchemy.types import JSON
+from bs4 import BeautifulSoup
+import whois
+import builtwith
+import sys
+import dns.resolver
 
 
 
 
-Base = declarative_base()
-
-
-
-# Define the CompanyInfo model
-class CompanyInfo(Base):
-    __tablename__ = 'company_info'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    temp_id = Column(Integer, unique=True, nullable=False)
-    company_name = Column(String(255), nullable=True,default="Unknown")
-    email = Column(String(255), nullable=True, unique=False)
-    url = Column(String(255), nullable=True)
-
-    def __repr__(self):
-        return f"<CompanyInfo(id={self.id}, company_name={self.company_name}, email={self.email})>"
-
-# Define the Vulnerability model
-class Vulnerabilities(Base):
-    __tablename__ = 'vulnerabilities'
-
-    company_id = Column(Integer, ForeignKey('company_info.id'), primary_key=True)  # Foreign Key & Primary Key
-    missing_headers = Column(JSON, nullable=True)  # JSON type for missing headers
-    ports = Column(JSON, nullable=True)  # Port field as a string, or Integer if you prefer
-    version_vulnerabilities = Column(JSON, nullable=True)  # ✅ Store version-based vulnerabilities
-
-
-    # Define the relationship to CompanyInfo
-    company = relationship("CompanyInfo", backref="vulnerabilities")
-
-    def __repr__(self):
-        return f"<Vulnerabilities(company_id={self.company_id}, ports={self.ports}, missing_headers={self.missing_headers})>"
-  
-engine = create_engine('mysql+pymysql://root:Mega442001#@localhost/pro_secure');
-
-# Session factory, bound to the engine
-Session = sessionmaker(bind=engine)
-
-# Create a new session
-session = Session()
-
-
-try: 
-    with engine.connect() as connection:
-        print('connected')
-except Exception as e:
-        print(e);
-
-# Session = sessionmaker(bind=engine);
-# session = Session();
-
-session.commit()
-
-Base.metadata.create_all(engine)
-'''
 
 
 
@@ -121,13 +54,15 @@ def is_domain_live(domain):
     """
     try:
         result = subprocess.run(
-            ["curl", "-Is", "--connect-timeout", "5", domain],
-            capture_output=True, text=True, timeout=20
+            ["curl", "-I", domain],
+            capture_output=True, text=True, timeout=200
         )
         if "HTTP/" in result.stdout:  # ✅ Found valid HTTP response
             return True
     except subprocess.TimeoutExpired:
         pass  # Ignore timeout errors
+    except Exception as e:
+        print(f"Error checking {domain}: {e}")
 
     return False  # ❌ Not live
 
@@ -171,42 +106,159 @@ def save_scan_result(temp_id, scan_data):
 
 
 
-# @app.route("/scan-results/<int:company_id>", methods=["GET"])
-# def get_scan_results(company_id):
-#     """ ✅ Fetch scan results using temp_id """
-#     file_path = os.path.join(SCAN_RESULTS_DIR, f"{company_id}.json")
 
-#     # ✅ Check if file exists before serving
-#     if not os.path.exists(file_path):
-#         return jsonify({"error": "Scan results not found"}), 404
+def resolve_live_url(domain, timeout=5):
+    """
+    Attempts to resolve the given domain to a live URL by checking HTTPS and HTTP schemes.
+    Returns the live URL if successful, or None if both fail.
+    """
+    # If the domain already includes a scheme, test it directly
+    if domain.startswith(('http://', 'https://')):
+        try:
+            response = requests.head(domain, timeout=timeout, allow_redirects=True)
+            if response.status_code < 400:
+                return domain
+        except requests.RequestException:
+            return None
+    else:
+        # Try HTTPS first, then HTTP
+        for scheme in ['https://', 'http://']:
+            test_url = f"{scheme}{domain}"
+            try:
+                response = requests.head(test_url, timeout=timeout, allow_redirects=True)
+                if response.status_code < 400:
+                    return test_url
+            except requests.RequestException:
+                continue
+    return None
 
-#     try:
-#         # ✅ Serve JSON file efficiently
-#         return send_file(file_path, mimetype="application/json")
+
+
+
+
+def get_whois_info(domain, entry_id):
+     # Extract domain name if URL includes scheme
+    parsed_url = urlparse(domain)
+    domain_name = parsed_url.netloc or parsed_url.path  # Handles cases with or without scheme
+ 
+
+
+    # :magnifying_glass: Get company_id from entry_id
+    company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+    if not company:
+        print(f":x: Company with entry_id {entry_id} not found.")
+        return
     
-#     except Exception as e:
-#         print(f"❌ Error serving scan results for company_id {company_id}: {e}")
-#         return jsonify({"error": "Internal Server Error"}), 500      
+    company_id = company.id
+
+    try:
+        print(f"getting the wso_is information ")
+        print(whois.__file__)
+        whois_info = whois.whois(domain)
+        whois_info = json.dumps(whois_info, default=custom_serializer, indent=2)
+        # print(whois_info)
+        session.query(Vulnerabilities).filter(Vulnerabilities.company_id == company_id).update(
+        {"info_http_headers": whois_info}
+        )
+        session.commit()
+        # :white_tick: Save in JSON file
+        save_scan_result(entry_id, {"whois_info": whois_info})
+        print(f"✅ WHOIS info saved for {domain_name}")
+        return whois_info
+    except Exception as e:
+        print(f"Error retrieving WHOIS info: {e}")
+        # who_is = get_whois_info(domain)
+        # print(who_is)
+        return None
+
+
+    # print(f":white_tick: WHOIS info saved for {domain}")   
 
 
 
+def custom_serializer(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return str(obj)
+
+def get_technologies(domain, entry_id):
+
+    company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+    if not company:
+        print(f":x: Company with entry_id {entry_id} not found.")
+        return
+    company_id = company.id
+    # Check if the domain includes a scheme
+    if domain.startswith(('http://', 'https://')):
+        url = domain
+    else:
+        # Try https first
+        for scheme in ['https://', 'http://']:
+            test_url = scheme + domain
+            try:
+                response = requests.head(test_url, timeout=5, allow_redirects=True)
+                if response.status_code < 400:
+                    url = test_url
+                    break
+            except requests.RequestException:
+                continue
+        else:
+            return {"error": "Unable to connect using http or https."}
+
+    try:
+        tech_info = builtwith.parse(url)
+        session.query(Vulnerabilities).filter(Vulnerabilities.company_id == company_id).update(
+            {"info_http_headers": tech_info}
+        )
+        session.commit()
+        # :white_tick: Save in JSON file
+        # Print JSON-formatted resul
+        save_scan_result(entry_id, {"new_tech_info" : tech_info}) 
+
+
+        return tech_info
+    
+
+
+    except Exception as e:
+        return {"error": str(e)}
+    
 
 
 
+def get_dns_records(domain, entry_id):
+    company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+    if not company:
+        print(f":x: Company with entry_id {entry_id} not found.")
+        return
+    company_id = company.id
+        # Extract the domain name if a scheme is present
+    if domain.startswith(('http://', 'https://')):
+        parsed_url = urlparse(domain)
+        domain_name = parsed_url.netloc
+    else:
+        domain_name = domain
+    record_types = ['A', 'AAAA', 'MX', 'NS', 'TXT', 'CNAME', 'SOA']
+    dns_info = {}
+    for record_type in record_types:
+        try:
+            answers = dns.resolver.resolve(domain_name, record_type)
+            dns_info[record_type] = [str(rdata) for rdata in answers]
+        except Exception as e:
+            dns_info[record_type] = [f"Error: {e}"]
+    
+    session.query(Vulnerabilities).filter(Vulnerabilities.company_id == company_id).update(
+            {"info_http_headers": dns_info}
+        )
+    session.commit()
 
-
-# Initialize Database
-# def init_db():
-#     conn = sqlite3.connect("scan_results.db")
-#     cursor = conn.cursor()
-#     cursor.execute('''CREATE TABLE IF NOT EXISTS scans (
-#                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-#                         domain TEXT,
-#                         open_ports TEXT,
-#                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-#     conn.commit()
-#     conn.close()
-
+    # Save the DNS information to a JSON file
+    save_scan_result(entry_id, {"dns_info": dns_info})
+    return dns_info
+        #dns_record = get_dns_records(extract_domain(domain))
+    # Print JSON-formatted resul
+        # save_scan_result(entry_id, {"dns_info" : dns_record})    
+    
 
 
 
@@ -215,16 +267,21 @@ def is_nmap_installed():
     return shutil.which("nmap") is not None  #  Check if Nmap exists
 
 # Function to run Nmap scan
-def run_nmap_scan(domain):
+def run_nmap_scan(domain, entry_id):
     if not is_nmap_installed():  # Check before running
         return "Nmap is not installed or not found in PATH."
 
 
     try:
+        # :magnifying_glass: Get company_id from entry_id
+        company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+        if not company:
+            print(f":x: Company with entry_id {entry_id} not found.")
+            return
+        company_id = company.id
         # Running Nmap to scan top 200 vulnerability ports within 5 seconds
+        print(f"nmapis running")
         result = subprocess.run(
-            #["nmap", "-T4", "--top-ports", "200", "--host-timeout", "60s", domain],  
-            #["nmap", "-T4", "--top-ports", "200", "-Pn", "--script", "vuln", domain],
             ["nmap", "-T5", "-p-", "--min-rate=1000", "-Pn", "--open", "--script", "vuln", domain],
             capture_output=True, text=True
         )
@@ -234,10 +291,19 @@ def run_nmap_scan(domain):
         if not open_ports:
             return "No open ports found!"
         
-
-        return ", ".join(open_ports)  # Return only open ports as a string
+        vulnerable_ports = [port for port in open_ports if port not in ["80", "443"]]
+        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+                    {"ports": vulnerable_ports}
+                )
+        session.commit()
+        save_scan_result(entry_id, {"open_ports": open_ports})
+        save_scan_result(entry_id, {"vulnerable_ports": vulnerable_ports})
+        print(f":white_tick: Nmap Scan completed for {domain}")
     except subprocess.TimeoutExpired:
-        return "Scan timed out!"    
+        print(f":x: Nmap scan timed out for {domain}")
+    except Exception as e:
+        print(f":x: Nmap scanning failed for {domain}: {e}")
+
 
 # ✅ Define the top 20 security headers
 TOP_20_HEADERS = [
@@ -249,10 +315,20 @@ TOP_20_HEADERS = [
 ]    
 
 
-def check_missing_headers(domain):
+def check_missing_headers(domain, entry_id):
     try:
-        url = f"http://{domain}"  # ✅ Try HTTP first
-        response = requests.get(url, timeout=5)
+        session = get_db_session()
+        # :magnifying_glass: Get company_id from entry_id
+        company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+        if not company:
+            print(f":x: Company with entry_id {entry_id} not found.")
+            return
+        company_id = company.id
+
+        print(f"scanning for missing_headers")
+
+          # ✅ Try HTTP first
+        response = requests.get(domain, timeout=5)
 
         # ✅ Convert response headers to lowercase for case-insensitive matching
         response_headers = {header.lower() for header in response.headers.keys()}
@@ -260,63 +336,89 @@ def check_missing_headers(domain):
         # ✅ Check which security headers are missing
         missing_headers = [header for header in TOP_20_HEADERS if header.lower() not in response_headers]
 
-        return missing_headers  # ✅ Return only the missing ones
+        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+            {"missing_headers": missing_headers}
+        )
+        session.commit()
+        save_scan_result(entry_id, {"missing_headers": missing_headers})
+        print(f":white_tick: Missing Header Analysis completed for {domain}")
+    except Exception as e:
+        print(f":x: Header check failed for {domain}: {e}")
 
-    except requests.RequestException:
-        return []  # ✅ Handle unreachable domains
-    
+ 
+
+
 def get_http_headers(domain):
-    try:
-        url = f"http://{domain}"
-        response = requests.get(url, timeout=5)
-        return dict(response.headers)  # ✅ Convert headers to a dictionary
-    except requests.RequestException:
-        return {}   
-
-
-    
-def detect_technology(domain):
-    try:
-        url = f"http://{domain}"  # Try HTTP first
-        response = requests.get(url, timeout=5)
-        
-        headers = response.headers
-
-        # Extract Server & X-Powered-By
-        server = headers.get("Server", "Unknown").lower()
-        x_powered_by = headers.get("X-Powered-By", "").lower()
-
-        # Identify Programming Language
-        if "PHP" in x_powered_by or "PHP" in server:
-            language = "PHP"
-        elif "ASP.NET" in x_powered_by or "ASP.NET" in server:
-            language = "ASP.NET"
-        elif "Node.js" in x_powered_by:
-            language = "Node.js"
-        elif "Python" in x_powered_by:
-            language = "Python"
-        elif "Java" in x_powered_by:
-            language = "Java"
+    # Parse the domain to check for scheme
+    parsed_url = urlparse(domain)
+    if parsed_url.scheme:
+        # Scheme is provided; use the domain as-is
+        url = domain
+    else:
+        # No scheme provided; try https first, then http
+        for scheme in ['https://', 'http://']:
+            test_url = scheme + domain
+            try:
+                response = requests.head(test_url, timeout=5, allow_redirects=True)
+                if response.status_code < 400:
+                    url = test_url
+                    break
+            except requests.RequestException:
+                continue
         else:
-            language = "Unknown"
+            # Neither scheme worked
+            return {}
 
-        # Identify CMS based on response body
-        cms = "Unknown"
-        if "wp-content" in response.text:
-            cms = "WordPress"
-        elif "Joomla" in response.text:
-            cms = "Joomla"
-        elif "Drupal" in response.text:
-            cms = "Drupal"
-
-        return {
-            "server": server,
-            "language": language,
-            "cms": cms
-        }
-
+    try:
+        response = requests.get(url, timeout=5)
+        return dict(response.headers)
     except requests.RequestException:
-        return {"server": "Error", "language": "Error", "cms": "Error"}     
+        return {}
+
+
+
+# def detect_technology(domain):
+#     try:
+#         url = f"http://{domain}"  # Try HTTP first
+#         response = requests.get(url, timeout=5)
+        
+#         headers = response.headers
+
+#         # Extract Server & X-Powered-By
+#         server = headers.get("Server", "Unknown").lower()
+#         x_powered_by = headers.get("X-Powered-By", "").lower()
+
+#         # Identify Programming Language
+#         if "PHP" in x_powered_by or "PHP" in server:
+#             language = "PHP"
+#         elif "ASP.NET" in x_powered_by or "ASP.NET" in server:
+#             language = "ASP.NET"
+#         elif "Node.js" in x_powered_by:
+#             language = "Node.js"
+#         elif "Python" in x_powered_by:
+#             language = "Python"
+#         elif "Java" in x_powered_by:
+#             language = "Java"
+#         else:
+#             language = "Unknown"
+
+#         # Identify CMS based on response body
+#         cms = "Unknown"
+#         if "wp-content" in response.text:
+#             cms = "WordPress"
+#         elif "Joomla" in response.text:
+#             cms = "Joomla"
+#         elif "Drupal" in response.text:
+#             cms = "Drupal"
+
+#         return {
+#             "server": server,
+#             "language": language,
+#             "cms": cms
+#         }
+
+#     except requests.RequestException:
+#         return {"server": "Error", "language": "Error", "cms": "Error"}     
     
 
 def perform_fuzzing(domain, server, language, cms):
@@ -380,73 +482,110 @@ def perform_fuzzing(domain, server, language, cms):
 
     return exposed_files
 
-def run_xsstrike(url):
-    """Run XSStrike against a given URL to detect XSS vulnerabilities with details."""
+def extract_links_with_params(domain):
     try:
-        command = ["python3", "XSStrike/xsstrike.py", "--url", url, "--crawl", "--blind"]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
-        
-        output = result.stdout
-        xss_vulnerability = []
-
-        for line in output.split("\n"):
-            if "Vulnerable" in line:  # Adjust based on actual XSStrike output
-                parts = line.split(":")
-                if len(parts) >= 3:
-                    vuln_url = parts[0].strip()
-                    vuln_param = parts[1].strip()
-                    payload = parts[2].strip()
-                    xss_vulnerability.append({
-                        "url": vuln_url,
-                        "parameter": vuln_param,
-                        "payload": payload,
-                        "type": "Reflected XSS"  # Modify based on detection logic
-                    })
-        
-        return xss_vulnerability if xss_vulnerability else None
+        response = requests.get(domain, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        urls = set()
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"]
+            full_url = urljoin(domain, href)
+            # Keep only URLs with query parameters (e.g., ?id=1)
+            if "?" in full_url:
+                urls.add(full_url)
+        return list(urls)
     except Exception as e:
-        return str(e)
-
-# def scan_open_redirection(domain):
-#     """Scans for Open Redirection vulnerabilities using a wordlist file."""
-#     PAYLOAD_FILE = os.path.join(os.path.dirname(__file__), "open_redirection", "open_redirect_wordlist.txt")
-#     vulnerable_urls = []
-
-#     try:
-#         with open(PAYLOAD_FILE, "r", encoding="utf-8") as file:
-#             payloads = [line.strip() for line in file if line.strip()]
-#     except FileNotFoundError:
-#         print(f"⚠️ Payload file not found: {PAYLOAD_FILE}")
-#         return []
+        print(f":warning: Error extracting links: {e}")
+        return []
     
 
-#      # ✅ Ensure the domain is parsed correctly
-#     parsed_domain = urlparse(domain).netloc
-#     # pay="go-koala.com"
-#     # test="http://google.com:80#@www.whitelisteddomain.tld/"
 
-#     for payload in payloads:
-#         # ✅ Construct test URL correctly
-#         if payload.startswith(("http://", "https://", "//")):
-#             test_url = payload  # Use absolute or scheme-relative URL as-is
-#         elif payload.startswith("/"):
-#             test_url = domain.rstrip("/") + payload  # Ensure no double slashes
-#         else:
-#             test_url = domain.rstrip("/") + "/" + payload  # Add single slash
-#         print(test_url)
-#         # print(test_url = urljoin(pay,test))
-#         try:
-#             response = requests.get(test_url, allow_redirects=True, timeout=5)
-#             final_url = response.url
+def run_xsstrike(domain,entry_id):
+    # :white_tick: Get company ID
+    company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+    if not company:
+        print(f":x: Company with entry_id {entry_id} not found.")
+        return
+    company_id = company.id
+    vulnerable = []
+    urls_to_test = extract_links_with_params(f"http://{domain}")
+    if not urls_to_test:
+        print(f":warning: No URLs with parameters found on {domain}")
+        return None
+    for url in urls_to_test:
+        try:
+            print(f":magnifying_glass: Scanning URL: {url}")
+            command = ["python3", "XSStrike/xsstrike.py", "--url", url, "--crawl", "--blind"]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+            output = result.stdout
+            for line in output.split("\n"):
+                if "Vulnerable" in line:
+                    parts = line.split(":")
+                    if len(parts) >= 3:
+                        vuln_url = parts[0].strip()
+                        vuln_param = parts[1].strip()
+                        payload = parts[2].strip()
+                        vulnerable.append({
+                            "url": vuln_url,
+                            "parameter": vuln_param,
+                            "payload": payload,
+                            "type": "Reflected XSS"
+                        })
+            # :white_tick: Store in DB
+            session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+                {"xss_vulnerabilities": vulnerable}
+            )
+            session.commit()
+            # :white_tick: Save in JSON file
+            save_scan_result(entry_id, {"xss_vuln_data": vulnerable})
+            print(f":white_tick: XSS Scan completed for {domain}")
+            return vulnerable if vulnerable else None
+        except Exception as e:
+            print(f":x: Error scanning {url}: {e}")
+            continue
 
 
-#             if response.history and urlparse(final_url).netloc != parsed_domain: # ✅ Check if redirection happened
-#                 vulnerable_urls.append({"payload": test_url, "redirected_to": final_url})
-#                 print(f"[!] Open Redirection Found: {test_url} → {final_url}")
-#         except requests.RequestException:
-#             continue  # Ignore request errors
 
-def scan_open_redirection(domain):
+
+
+
+
+
+# def run_xsstrike(url):
+#     """Run XSStrike against a given URL to detect XSS vulnerabilities with details."""
+#     try:
+#         command = ["python3", "XSStrike/xsstrike.py", "--url", url, "--crawl", "--blind"]
+#         result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        
+#         output = result.stdout
+#         xss_vulnerability = []
+
+#         for line in output.split("\n"):
+#             if "Vulnerable" in line:  # Adjust based on actual XSStrike output
+#                 parts = line.split(":")
+#                 if len(parts) >= 3:
+#                     vuln_url = parts[0].strip()
+#                     vuln_param = parts[1].strip()
+#                     payload = parts[2].strip()
+#                     xss_vulnerability.append({
+#                         "url": vuln_url,
+#                         "parameter": vuln_param,
+#                         "payload": payload,
+#                         "type": "Reflected XSS"  # Modify based on detection logic
+#                     })
+        
+#         return xss_vulnerability if xss_vulnerability else None
+#     except Exception as e:
+#         return str(e)
+
+
+def scan_open_redirection(domain, entry_id):
+
+    company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+    if not company:
+        print(f":x: Company with entry_id {entry_id} not found.")
+        return
+    company_id = company.id
     """
     Scans a given domain for Open Redirection vulnerabilities using a wordlist.
     
@@ -492,6 +631,13 @@ def scan_open_redirection(domain):
         except requests.RequestException:
             continue  # Ignore errors and timeouts
 
+    session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+    {"open_redirection_vulnerabilities": vulnerable_urls}
+    )
+    session.commit()
+    save_scan_result(entry_id, {"open_redirection_vulnerabilities": vulnerable_urls})
+    print(f":white_tick: Open Redirection Scan completed for {domain}")
+
     return vulnerable_urls        
 
 # #def detect_os_command_injection(domain):
@@ -506,7 +652,12 @@ def load_wordlist(file_name):
     return []
 
 
-def enumerate_directories(domain):
+def enumerate_directories(domain, entry_id):
+    company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+    if not company:
+        print(f":x: Company with entry_id {entry_id} not found.")
+        return
+    company_id = company.id
     """ ✅ Enumerate directories using wordlist and store in DB """
     detected_directories = []
     directory_wordlist = load_wordlist("directories.txt")  # ✅ Load directories list
@@ -523,8 +674,21 @@ def enumerate_directories(domain):
         except requests.RequestException:
             pass  # Ignore errors
 
+    session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        {"Directory_enumration_vulnerabilities": detected_directories}
+    )
+    session.commit()
+    save_scan_result(entry_id, {"Directory_enumration_vulnerabilities": detected_directories})
+    print(f"✅ Open Redirection Scan completed for {domain}")
 
-def check_clickjacking(domain):
+
+
+def check_clickjacking(domain, entry_id):
+    company = session.query(CompanyInfo.id).filter(CompanyInfo.temp_id == entry_id).first()
+    if not company:
+        print(f":x: Company with entry_id {entry_id} not found.")
+        return
+    company_id = company.id
     """
     Checks if the given domain is vulnerable to Clickjacking.
     Returns a dictionary with the scan results.
@@ -551,7 +715,7 @@ def check_clickjacking(domain):
             vulnerable = True
 
         # Return the scan result
-        return {
+        clickjacking_result = {
             "domain": domain,
             "x_frame_options": x_frame_options if x_frame_options else "Not Set",
             "content_security_policy": content_security_policy if content_security_policy else "Not Set",
@@ -560,135 +724,187 @@ def check_clickjacking(domain):
         }
 
     except requests.RequestException as e:
-        return {"error": f"Failed to check Clickjacking for {domain}: {str(e)}"}
+        clickjacking_result = {"error": f"Failed to check Clickjacking for {domain}: {str(e)}"}
+    
+    # ✅ Save Clickjacking vulnerability in DB
+    session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        {"clickjacking_vulnerability": clickjacking_result}
+    )
+    session.commit()
+
+    # ✅ Save Clickjacking scan result to JSON file
+    save_scan_result(entry_id, {"clickjacking_vulnerability": clickjacking_result})
+
+    print(f"✅ Clickjacking Scan completed for {domain}")
 
 
-def perform_full_scan(domain, entry_id, company_id):
+
+def perform_full_scan(domain, entry_id):
     """Runs all security scans one by one and stores each result in the database."""
-    #session = get_db_session()  # Get DB session
+    session = get_db_session()  # Get DB session
+
+    company_id = session.query(CompanyInfo.id).filter(CompanyInfo.id == entry_id).first();
+    session.commit()
  
     # company_id = company_id.id
 
     print('hi_______->')
     print(company_id)
+    domain=resolve_live_url(domain)
 
      # 🔍 Step 1: Check if the domain is live
    
 
     try:
 
-        scan_results = {}
-        scan_result = run_nmap_scan(domain)
-        open_ports = scan_result.split(", ") if scan_result and scan_result != "No open ports found!" else []
-        open_ports.append("890")
-        vulnerable_ports = [port for port in open_ports if port not in ["80", "443"]]
+        process = multiprocessing.Process(target=run_nmap_scan, args=(domain, entry_id))
+        process.start()
 
-        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
-            {"ports": vulnerable_ports}
-        )
+        process = multiprocessing.Process(target=check_missing_headers, args=(domain, entry_id))
+        process.start()
+
+        process = multiprocessing.Process(target=run_xsstrike, args=(domain, entry_id))
+        process.start()
+
+        process = multiprocessing.Process(target=scan_open_redirection, args=(domain, entry_id))
+        process.start()
+
+        process = multiprocessing.Process(target=enumerate_directories, args=(domain, entry_id))
+        process.start()
+
+
+        process = multiprocessing.Process(target=check_clickjacking, args=(domain, entry_id))
+        process.start()
+
+        process = multiprocessing.Process(target=get_whois_info, args=(domain, entry_id))
+        process.start()
+
+        process = multiprocessing.Process(target=get_technologies, args=(domain, entry_id))
+        process.start()
+
+        process = multiprocessing.Process(target=get_dns_records, args=(domain, entry_id))
+        process.start()
+
+
+
+
+
+
+
+
+
+        #scan_results = {}
+        # scan_result = run_nmap_scan(domain)
+        # open_ports = scan_result.split(", ") if scan_result and scan_result != "No open ports found!" else []
+        # open_ports.append("890")
+        # vulnerable_ports = [port for port in open_ports if port not in ["80", "443"]]
+
+        # session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        #     {"ports": vulnerable_ports}
+        # )
         
-        # session.add(Vulnerabilities(company_id=company_id, ports=vulnerable_ports))
-        session.commit()
-        save_scan_result(entry_id, {"open_ports": open_ports})
-        save_scan_result(entry_id, {"vulnerable_ports": vulnerable_ports})
-        print(f"✅ Nmap Scan completed for {domain}")
-
-
-         # ✅ Check Missing Headers
-        missing_headers = check_missing_headers(domain)
-        #http_headers = get_http_headers(domain)
-        
-        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
-            {  "missing_headers": missing_headers}
-        )
-        session.commit()
-        save_scan_result(entry_id, {"missing_headers": missing_headers})
-        print(f"✅ Missing Header Analysis completed for {domain}")
-
-
-
-        # ✅ Detect Server, Language, CMS
-        tech_info = detect_technology(domain)
-        tech_data = json.loads(tech_info) if isinstance(tech_info, str) else tech_info
-        server = tech_data.get("server", "Unknown")
-        language = tech_data.get("language", "Unknown")
-        cms = tech_data.get("cms", "Unknown")
-
-        exposed_files = []
-        if server != "Unknown" or language != "Unknown" or cms != "Unknown":
-            exposed_files = perform_fuzzing(domain, server, language, cms)
-        
-        updated_tech_info = [
-            {"techinfo": f"{language}, {server}"},
-            {"techinfoVulnerability": exposed_files} if exposed_files else {"techinfoVulnerability": {}}
-        ]
-
-        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
-            {"technology_info": updated_tech_info}
-        )
-        session.commit()
-        save_scan_result(entry_id, {"updated_tech_info": updated_tech_info})
-        print(f"✅ Technology Detection completed for {domain}")
-
-
-        # ✅ Run XSStrike for XSS scanning
-        xss_results = run_xsstrike(domain)
-        xss_vuln_data = xss_results if xss_results else []
-
-        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
-            {"xss_vulnerabilities": xss_vuln_data}
-        )
-        session.commit()
-        save_scan_result(entry_id, {"xss_vuln_data": xss_vuln_data})
-        print(f"✅ XSS Scan completed for {domain}")
-
-
-
-        # ✅ Open Redirection Scan
-        open_redirect_vulnerabilities = scan_open_redirection(domain)
-
-        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
-            {"open_redirection_vulnerabilities": open_redirect_vulnerabilities}
-        )
-        session.commit()
-        save_scan_result(entry_id, {"open_redirect_vulnerabilities": open_redirect_vulnerabilities})
-        print(f"✅ Open Redirection Scan completed for {domain}")
-
-                 # ✅ Detect OS Command Injection
-        # os_command_vulns = detect_os_command_injection(domain)
-        # session.query(Vulnerabilities).filter_by(company_id=entry_id).update({"os_command_injection_vulnerabilities": os_command_vulns})
+        # # session.add(Vulnerabilities(company_id=company_id, ports=vulnerable_ports))
         # session.commit()
-        # save_scan_result(entry_id, {"os_command_injection_vulnerabilities": os_command_vulns})
-        # print(f"✅ OS Command Injection Scan completed for {domain}")
+        # save_scan_result(entry_id, {"open_ports": open_ports})
+        # save_scan_result(entry_id, {"vulnerable_ports": vulnerable_ports})
+        # print(f"✅ Nmap Scan completed for {domain}")
+
+
+        #  # ✅ Check Missing Headers
+        # missing_headers = check_missing_headers(domain)
+        # #http_headers = get_http_headers(domain)
+        
+        # session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        #     {  "missing_headers": missing_headers}
+        # )
+        # session.commit()
+        # save_scan_result(entry_id, {"missing_headers": missing_headers})
+        # print(f"✅ Missing Header Analysis completed for {domain}")
+
+
+
+        # # ✅ Detect Server, Language, CMS
+        # tech_info = detect_technology(domain)
+        # tech_data = json.loads(tech_info) if isinstance(tech_info, str) else tech_info
+        # server = tech_data.get("server", "Unknown")
+        # language = tech_data.get("language", "Unknown")
+        # cms = tech_data.get("cms", "Unknown")
+
+        # exposed_files = []
+        # if server != "Unknown" or language != "Unknown" or cms != "Unknown":
+        #     exposed_files = perform_fuzzing(domain, server, language, cms)
+        
+        # updated_tech_info = [
+        #     {"techinfo": f"{language}, {server}"},
+        #     {"techinfoVulnerability": exposed_files} if exposed_files else {"techinfoVulnerability": {}}
+        # ]
+
+        # session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        #     {"technology_info": updated_tech_info}
+        # )
+        # session.commit()
+        # save_scan_result(entry_id, {"updated_tech_info": updated_tech_info})
+        # print(f"✅ Technology Detection completed for {domain}")
+
+
+        # # ✅ Run XSStrike for XSS scanning
+        # xss_results = run_xsstrike(domain)
+        # xss_vuln_data = xss_results if xss_results else []
+
+        # session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        #     {"xss_vulnerabilities": xss_vuln_data}
+        # )
+        # session.commit()
+        # save_scan_result(entry_id, {"xss_vuln_data": xss_vuln_data})
+        # print(f"✅ XSS Scan completed for {domain}")
+
+
+
+        # # ✅ Open Redirection Scan
+        # open_redirect_vulnerabilities = scan_open_redirection(domain)
+
+        # session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        #     {"open_redirection_vulnerabilities": open_redirect_vulnerabilities}
+        # )
+        # session.commit()
+        # save_scan_result(entry_id, {"open_redirect_vulnerabilities": open_redirect_vulnerabilities})
+        # print(f"✅ Open Redirection Scan completed for {domain}")
+
+        #          # ✅ Detect OS Command Injection
+        # # os_command_vulns = detect_os_command_injection(domain)
+        # # session.query(Vulnerabilities).filter_by(company_id=entry_id).update({"os_command_injection_vulnerabilities": os_command_vulns})
+        # # session.commit()
+        # # save_scan_result(entry_id, {"os_command_injection_vulnerabilities": os_command_vulns})
+        # # print(f"✅ OS Command Injection Scan completed for {domain}")
 
         
 
-        directory_enumration_vuln = enumerate_directories(domain)
+        # directory_enumration_vuln = enumerate_directories(domain)
 
-        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
-            {"Directory_enumration_vulnerabilities": directory_enumration_vuln}
-        )
-        session.commit()
-        save_scan_result(entry_id, {"Directory_enumration_vulnerabilities": directory_enumration_vuln})
-        print(f"✅ Open Redirection Scan completed for {domain}")
+        # session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        #     {"Directory_enumration_vulnerabilities": directory_enumration_vuln}
+        # )
+        # session.commit()
+        # save_scan_result(entry_id, {"Directory_enumration_vulnerabilities": directory_enumration_vuln})
+        # print(f"✅ Open Redirection Scan completed for {domain}")
 
-                # ✅ Run Clickjacking Scan
-        clickjacking_result = check_clickjacking(domain)
+        #         # ✅ Run Clickjacking Scan
+        # clickjacking_result = check_clickjacking(domain)
 
-        # ✅ Save Clickjacking vulnerability in DB
-        session.query(Vulnerabilities).filter_by(company_id=company_id).update(
-            {"clickjacking_vulnerability": clickjacking_result}
-        )
-        session.commit()
+        # # ✅ Save Clickjacking vulnerability in DB
+        # session.query(Vulnerabilities).filter_by(company_id=company_id).update(
+        #     {"clickjacking_vulnerability": clickjacking_result}
+        # )
+        # session.commit()
 
-        # ✅ Save Clickjacking scan result to JSON file
-        save_scan_result(entry_id, {"clickjacking_vulnerability": clickjacking_result})
+        # # ✅ Save Clickjacking scan result to JSON file
+        # save_scan_result(entry_id, {"clickjacking_vulnerability": clickjacking_result})
 
-        print(f"✅ Clickjacking Scan completed for {domain}")
+        # print(f"✅ Clickjacking Scan completed for {domain}")
 
 
-        print(f"✅ All scans completed for {domain}")
-        save_scan_result(entry_id, {"status": "complete"})
+        # print(f"✅ All scans completed for {domain}")
+        # save_scan_result(entry_id, {"status": "complete"})
 
 
 
@@ -812,80 +1028,18 @@ def scan():
         print(f"✅ HTTP Header Analysis completed for {domain}")
 
         # ✅ Start background scan
-        process = multiprocessing.Process(target=perform_full_scan, args=(domain, new_temp_id, company_id))
+        process = multiprocessing.Process(target=perform_full_scan, args=(domain, new_temp_id))
         process.start()
 
 
 
-        #session.commit()  # Commit changes to store entry
-
-        # Run Nmap scan
-        ##scan_result = run_nmap_scan(domain)
-        # scan_result = run_nmap_scan(domain)
-
-        # # ✅ Filter out non-vulnerable ports (80, 443)
-        # open_ports = scan_result.split(", ") if scan_result and scan_result != "No open ports found!" else []
-        # open_ports.append("890")
-        # vulnerable_ports = [port for port in open_ports if port not in ["80", "443"]]
-
-        # ✅ Check missing headers
-        # missing_headers = check_missing_headers(domain)
-        # http_headers = get_http_headers(domain)
-        #  # ✅ Detect Server, Language, and CMS
-        # tech_info = detect_technology(domain)
-
-
-
-
-        #  # ✅ Perform fuzzing if tech is detected
-        # tech_data = json.loads(tech_info) if tech_info and isinstance(tech_info, str) else tech_info
-        # server = tech_data.get("server", "Unknown")
-        # language = tech_data.get("language", "Unknown")
-        # cms = tech_data.get("cms", "Unknown")
-
-
-        # exposed_files = []
-        # if server == "Unknown" and language == "Unknown" and cms == "Unknown":
-        #     print(f"⚠️ No known technology found for {domain}. Skipping misconfiguration scan.")
-        #     exposed_files = []  # No scanning
-        # else:    
-            
-        #     exposed_files = perform_fuzzing(domain, server, language, cms)
-
-
-        #         # ✅ Format tech_info with vulnerabilities
-        # updated_tech_info = [
-
-        #     {"techinfo": f"{language}, {server}"},
-        #     {"techinfoVulnerability": exposed_files} if exposed_files else {}
-        # ]    
-
        
-        
-        #  # ✅ Run XSStrike for XSS scanning
-        # xss_results = run_xsstrike(domain)
 
-        # # ✅ Store XSS vulnerabilities with details
-        # xss_vuln_data = xss_results if xss_results else []
 
-        # # ✅ Open Redirection Scan
-        # open_redirect_vulnerabilities = scan_open_redirection(domain)
 
 
        
 
-        # # ✅ Store vulnerabilities in the database (INSIDE `scan()`)
-        # vulnerability_entry = Vulnerabilities(
-        #     company_id=new_entry.id, 
-        #     ports=vulnerable_ports, # Link to company
-        #     missing_headers=missing_headers , # ✅ Store missing headers
-        #     info_http_headers=http_headers,
-        #     technology_info=updated_tech_info,
-        #     xss_vulnerabilities=xss_vuln_data ,
-        #     open_redirection_vulnerabilities=open_redirect_vulnerabilities,
-        # )
-        # session.add(vulnerability_entry)
-        # session.commit() 
         
 
 
@@ -895,27 +1049,6 @@ def scan():
         print(f"Error: {e}")  # Print error in Flask console
         session.rollback()  # Rollback changes if any error occurs
         return jsonify({"error": "Internal Server Error"}), 500  # Return JSON instead of HTML
-
-'''
-@app.route("/scan", methods=["POST"])
-def scan():
-    try:
-        data = request.get_json()
-        if not data or "domain" not in data:
-            return jsonify({"error": "No domain provided"}), 400
-        
-        domain = data["domain"]
-        
-        print("Received domain:", domain)
-        
-        scan_result = run_nmap_scan(domain)
-
-        return jsonify({"domain": domain, "scan_result": scan_result})
-
-    except Exception as e:
-        print(f"Error: {e}")  #  Print error in Flask console
-        return jsonify({"error": "Internal Server Error"}), 500  #  Return JSON instead of HTML
-'''
 
 
 @app.route("/scan/results/<temp_id>", methods=["GET"])
